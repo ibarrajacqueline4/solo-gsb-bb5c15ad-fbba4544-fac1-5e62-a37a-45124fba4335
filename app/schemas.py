@@ -122,6 +122,70 @@ class StoichiometryResponse(BaseModel):
     reactants: list[ReactantRemainder] = Field(description="各反应物投料/消耗/剩余")
 
 
+class PlanMaterialSpec(BaseModel):
+    formula: str = Field(
+        description="反应物分子式（必须是反应物之一）", examples=["H2"]
+    )
+    purity: Decimal = Field(
+        description="原料纯度（质量分数，(0,1]）", examples=["0.98"]
+    )
+    excess_percent: Decimal = Field(
+        description="过量百分比（非负数，0 表示按化学计量投料）", examples=["10"]
+    )
+
+
+class StoichiometryPlanRequest(BaseModel):
+    reactants: list[str] = Field(
+        min_length=1,
+        description="反应物分子式列表",
+        examples=[["H2", "O2"]],
+    )
+    products: list[str] = Field(
+        min_length=1,
+        description="生成物分子式列表",
+        examples=[["H2O"]],
+    )
+    target_product: str = Field(
+        description="目标生成物分子式（必须在 products 中）", examples=["H2O"]
+    )
+    target_mass: Decimal = Field(
+        description="目标纯品质量（g），必须为正数", examples=["100"]
+    )
+    yield_fraction: Decimal = Field(
+        description="预计收率（小数，(0,1]）", examples=["0.85"]
+    )
+    materials: list[PlanMaterialSpec] = Field(
+        description="各反应物的原料配置（每种反应物恰好一条：纯度与过量百分比）"
+    )
+    precision: int = Field(
+        default=4,
+        ge=2,
+        le=8,
+        description="输出小数位数（四舍五入），2～8，默认 4",
+    )
+
+
+class PlanMaterial(BaseModel):
+    formula: str
+    coefficient: int = Field(description="配平系数")
+    stoichiometric_moles: str = Field(
+        description="化学计量摩尔数（mol，定精度小数字符串）"
+    )
+    excess_moles: str = Field(description="叠加过量后的摩尔数（mol）")
+    actual_grams: str = Field(description="实际称量值（g，已按纯度折算）")
+
+
+class StoichiometryPlanResponse(BaseModel):
+    equation: str
+    coefficients: list[int] = Field(description="全部系数（先反应物后生成物）")
+    reactant_coefficients: list[int]
+    product_coefficients: list[int]
+    precision: int = Field(description="实际采用的小数位数")
+    target_product: str = Field(description="目标生成物")
+    extent: str = Field(description="理论反应进度 ξ（mol，定精度小数字符串）")
+    materials: list[PlanMaterial] = Field(description="各反应物的投料规划")
+
+
 class FormulaInferRequest(BaseModel):
     percentages: dict[str, Decimal] = Field(
         min_length=1,

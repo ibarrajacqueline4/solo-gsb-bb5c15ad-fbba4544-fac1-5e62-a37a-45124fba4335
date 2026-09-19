@@ -1,4 +1,4 @@
-"""化学计量：限制反应物判定、理论产量与剩余量计算。
+"""化学计量：限制反应物判定、理论产量与剩余量计算；批次投料规划。
 
 复用 parser 的分子式解析与 balancer 的配平结果，按内置原子量表
 （H、C、N、O、Na、Mg、Al、S、Cl、K、Ca、Fe、Cu、Mn）换算物质的量。
@@ -14,7 +14,7 @@ from .balancer import balance_equation
 from .parser import parse_formula
 
 if TYPE_CHECKING:  # 避免在逻辑层硬依赖 API 模型
-    from .schemas import FeedItem
+    from .schemas import FeedItem, PlanMaterialSpec
 
 
 class StoichiometryError(ValueError):
@@ -178,4 +178,103 @@ def compute_stoichiometry(
             "limiting_reactants": limiting,
             "products": product_rows,
             "reactants": reactant_rows,
+        }
+
+
+def compute_batch_plan(
+    reactants: list[str],
+    products: list[str],
+    target_product: str,
+    target_mass: Decimal,
+    yield_fraction: Decimal,
+    materials: list[PlanMaterialSpec],
+    precision: int,
+) -> dict:
+    """批次投料规划：目标纯品质量/收率 → 理论反应进度 → 纯物质需求 → 过量与纯度折算。
+
+    理论反应进度 ξ = 目标纯品物质的量 ÷ 收率 ÷ 目标物配平系数；
+    每种反应物的化学计量摩尔数 = ν·ξ，叠加过量百分比后按纯度折算实际称量克数。
+    FormulaError / BalanceError 继续向上抛，由路由层映射为 4xx。
+    """
+    balanced = balance_equation(reactants, products)
+    r_coeffs = balanced["reactant_coefficients"]
+    p_coeffs = balanced["product_coefficients"]
+
+    # ---- 目标与全局参数校验 ----
+    target = target_product.strip()
+    if target not in products:
+        raise StoichiometryError(f"目标生成物 {target!r} 不在生成物列表中")
+    if not target_mass.is_finite() or target_mass <= 0:
+        raise StoichiometryError(
+            f"目标纯品质量必须为正数: target_mass 为 {target_mass}"
+        )
+    if not yield_fraction.is_finite() or yield_fraction <= 0 or yield_fraction > 1:
+        raise StoichiometryError(
+            f"预计收率必须在 (0,1] 区间内: yield_fraction 为 {yield_fraction}"
+        )
+
+    # ---- 原料配置校验：重复配置 / 非反应物 / 纯度与过量越界 / 缺失配置 ----
+    specs: dict[str, tuple[Decimal, Decimal]] = {}
+    for item in materials:
+        formula = item.formula.strip()
+        if formula in specs:
+            raise StoichiometryError(f"同一反应物重复配置: {formula!r}")
+        if formula not in reactants:
+            raise StoichiometryError(f"原料配置 {formula!r} 不在反应物列表中")
+        if not item.purity.is_finite() or item.purity <= 0 or item.purity > 1:
+            raise StoichiometryError(
+                f"纯度必须在 (0,1] 区间内: {formula!r} 的 purity 为 {item.purity}"
+            )
+        if not item.excess_percent.is_finite() or item.excess_percent < 0:
+            raise StoichiometryError(
+                f"过量百分比必须为非负数: {formula!r} 的 excess_percent 为 "
+                f"{item.excess_percent}"
+            )
+        specs[formula] = (item.purity, item.excess_percent)
+    missing = [r for r in reactants if r not in specs]
+    if missing:
+        raise StoichiometryError(f"缺少反应物原料配置: {', '.join(missing)}")
+
+    # ---- 摩尔质量：目标生成物与全部反应物；任一含表外元素即报错 ----
+    masses = {f: molar_mass(f) for f in list(reactants) + [target]}
+    target_molar_mass = masses[target]
+    if target_molar_mass == 0:
+        raise StoichiometryError(
+            f"目标生成物 {target!r} 摩尔质量为 0（如电子 e），无法按质量规划"
+        )
+
+    with localcontext() as ctx:
+        # 内部精度远高于输出精度（2～8 位），避免中间舍入误差
+        ctx.prec = 50
+
+        # 目标纯品实际物质的量 ÷ 收率 = 理论物质的量 → 理论反应进度 ξ
+        target_index = products.index(target)
+        theoretical_target_moles = (target_mass / target_molar_mass) / yield_fraction
+        extent = theoretical_target_moles / p_coeffs[target_index]
+
+        material_rows = []
+        for i, formula in enumerate(reactants):
+            purity, excess_percent = specs[formula]
+            stoich_moles = r_coeffs[i] * extent
+            excess_moles = stoich_moles * (1 + excess_percent / 100)
+            actual_grams = excess_moles * masses[formula] / purity
+            material_rows.append(
+                {
+                    "formula": formula,
+                    "coefficient": r_coeffs[i],
+                    "stoichiometric_moles": _round(stoich_moles, precision),
+                    "excess_moles": _round(excess_moles, precision),
+                    "actual_grams": _round(actual_grams, precision),
+                }
+            )
+
+        return {
+            "equation": balanced["equation"],
+            "coefficients": balanced["coefficients"],
+            "reactant_coefficients": r_coeffs,
+            "product_coefficients": p_coeffs,
+            "precision": precision,
+            "target_product": target,
+            "extent": _round(extent, precision),
+            "materials": material_rows,
         }
