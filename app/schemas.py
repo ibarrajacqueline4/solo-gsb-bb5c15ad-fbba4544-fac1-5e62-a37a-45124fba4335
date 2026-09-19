@@ -122,6 +122,80 @@ class StoichiometryResponse(BaseModel):
     reactants: list[ReactantRemainder] = Field(description="各反应物投料/消耗/剩余")
 
 
+class MaterialSpec(BaseModel):
+    formula: str = Field(
+        description="原料分子式（必须是反应物之一）", examples=["H2"]
+    )
+    purity: Decimal = Field(
+        description="原料纯度（质量分数，(0,1]）", examples=["0.98"]
+    )
+    excess_percent: Decimal = Field(
+        description="过量百分比（非负，如 10 表示过量 10%）", examples=["10"]
+    )
+
+
+class StoichiometryPlanRequest(BaseModel):
+    reactants: list[str] = Field(
+        min_length=1,
+        description="反应物分子式列表",
+        examples=[["H2", "O2"]],
+    )
+    products: list[str] = Field(
+        min_length=1,
+        description="生成物分子式列表",
+        examples=[["H2O"]],
+    )
+    target_product: str = Field(
+        description="目标生成物（必须是 products 之一）", examples=["H2O"]
+    )
+    target_mass: Decimal = Field(
+        description="目标纯品质量（g，正数）", examples=["36.03"]
+    )
+    yield_fraction: Decimal = Field(
+        description="预计收率（(0,1]，实际产量 / 理论产量）", examples=["0.9"]
+    )
+    materials: list[MaterialSpec] = Field(
+        description="各反应物的原料配置（每种反应物恰好一条：纯度 + 过量百分比）"
+    )
+    precision: int = Field(
+        default=4,
+        ge=2,
+        le=8,
+        description="输出小数位数（四舍五入），2～8，默认 4",
+    )
+
+
+class MaterialPlan(BaseModel):
+    formula: str
+    coefficient: int = Field(description="配平系数")
+    purity: str = Field(description="原料纯度（回显）")
+    excess_percent: str = Field(description="过量百分比（回显）")
+    stoichiometric_moles: str = Field(
+        description="化学计量摩尔数（mol，定精度小数字符串）"
+    )
+    moles_with_excess: str = Field(description="叠加过量后的摩尔数（mol）")
+    weigh_grams: str = Field(description="实际称量值（g，按纯度折算）")
+
+
+class StoichiometryPlanResponse(BaseModel):
+    equation: str
+    coefficients: list[int] = Field(description="全部系数（先反应物后生成物）")
+    reactant_coefficients: list[int]
+    product_coefficients: list[int]
+    precision: int = Field(description="实际采用的小数位数")
+    target_product: str
+    target_mass: str = Field(description="目标纯品质量（g，回显）")
+    yield_fraction: str = Field(description="预计收率（回显）")
+    target_theoretical_moles: str = Field(
+        description="目标物理论摩尔数（mol，= 目标质量 / 收率 / 摩尔质量）"
+    )
+    target_theoretical_grams: str = Field(
+        description="目标物理论质量（g，= 目标质量 / 收率）"
+    )
+    extent: str = Field(description="理论反应进度 ξ（mol，定精度小数字符串）")
+    materials: list[MaterialPlan] = Field(description="逐原料投料规划")
+
+
 class FormulaInferRequest(BaseModel):
     percentages: dict[str, Decimal] = Field(
         min_length=1,

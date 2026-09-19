@@ -4,6 +4,8 @@
 
 另提供**化学计量接口**：在配平结果基础上，按内置原子量表（H、C、N、O、Na、Mg、Al、S、Cl、K、Ca、Fe、Cu、Mn）换算投料物质的量，以反应进度最小值判定（可并列的）限制反应物，返回理论反应进度、各生成物理论产量与各反应物剩余量。全程 `Decimal` 计算，输出按请求 `precision` 四舍五入。
 
+以及**批次投料规划接口**：给定目标生成物的纯品质量与预计收率，反推理论反应进度，按配平系数求各反应物的化学计量摩尔数，再叠加每种原料的非负过量百分比、按纯度折算实际称量克数，返回配平方程、理论反应进度与逐原料投料规划。
+
 以及**经验式推断接口**：由元素质量百分比反推经验式——先按内置原子量表换算摩尔比，再在 1～12 倍尺度内生成互质正整数下标候选，用候选式反算理论百分比并保留最大绝对偏差不超过 `tolerance` 者（并列时依次取总原子数较少、Hill 顺序字符串较小者）；提供实测摩尔质量时，按最接近的正整数倍给出分子式。
 
 ## 快速启动（单条命令）
@@ -158,6 +160,62 @@ curl -s http://localhost:8000/api/v1/stoichiometry \
 | `400` | 化学式无法解析；缺失投料；同一物质重复投料；投料量非正数；投料物质不是反应物；元素无内置原子量 |
 | `422` | 方程无法配平（零空间维数不为 1 或无法全正）；单位不是 `mol`/`g`；`precision` 超出 2～8 |
 
+### `POST /api/v1/stoichiometry/plan` — 批次投料规划
+
+由目标生成物的纯品质量与预计收率反推各原料称量：先配平方程，再由 `target_mass / yield_fraction` 得目标物理论产量、除以配平系数得**理论反应进度 ξ**；然后按配平系数求每种反应物的**化学计量摩尔数**，叠加该原料的**过量百分比**（`excess_percent`，非负）得到过量后摩尔数，最后按**纯度**（`purity`，(0,1] 质量分数）折算**实际称量克数**（`weigh_grams = 过量后摩尔数 × 摩尔质量 / 纯度`）。
+
+- `target_product` 必须是 `products` 之一；`target_mass`（g）须为正数；`yield_fraction` 须在 (0,1] 内。
+- 每种反应物必须在 `materials` 中恰好配置一条（纯度 + 过量百分比）；原子量表同化学计量接口。
+- 全程 `Decimal` 计算，所有小数字段按 `precision`（2～8，默认 4）四舍五入为**定长小数字符串**返回。
+
+```bash
+curl -s http://localhost:8000/api/v1/stoichiometry/plan \
+  -H 'Content-Type: application/json' \
+  -d '{
+        "reactants": ["H2", "O2"],
+        "products": ["H2O"],
+        "target_product": "H2O",
+        "target_mass": "36.03",
+        "yield_fraction": "0.9",
+        "materials": [
+          {"formula": "H2", "purity": "0.98", "excess_percent": "10"},
+          {"formula": "O2", "purity": "1",    "excess_percent": "0"}
+        ],
+        "precision": 4
+      }'
+```
+
+响应（`200`）：
+
+```json
+{
+  "equation": "2H2 + O2 -> 2H2O",
+  "coefficients": [2, 1, 2],
+  "reactant_coefficients": [2, 1],
+  "product_coefficients": [2],
+  "precision": 4,
+  "target_product": "H2O",
+  "target_mass": "36.03",
+  "yield_fraction": "0.9",
+  "target_theoretical_moles": "2.2222",
+  "target_theoretical_grams": "40.0333",
+  "extent": "1.1111",
+  "materials": [
+    {"formula": "H2", "coefficient": 2, "purity": "0.98", "excess_percent": "10",
+     "stoichiometric_moles": "2.2222", "moles_with_excess": "2.4444", "weigh_grams": "5.0286"},
+    {"formula": "O2", "coefficient": 1, "purity": "1", "excess_percent": "0",
+     "stoichiometric_moles": "1.1111", "moles_with_excess": "1.1111", "weigh_grams": "35.5533"}
+  ]
+}
+```
+
+错误返回：
+
+| 状态码 | 场景 |
+| --- | --- |
+| `400` | 化学式无法解析；目标物不在生成物列表；`target_mass` 非正数；`yield_fraction` 不在 (0,1]；`purity` 不在 (0,1]；`excess_percent` 为负；原料配置缺失/重复/不是反应物；元素无内置原子量 |
+| `422` | 方程无法配平（零空间维数不为 1 或无法全正）；`precision` 超出 2～8 |
+
 ### `POST /api/v1/formula/infer` — 经验式/分子式推断
 
 由元素质量百分比反推经验式：按内置原子量表把百分比换算为摩尔比，在 **1～12 倍尺度**内四舍五入并约简为**互质正整数下标**候选；用候选式反算各元素理论百分比，保留**最大绝对偏差 ≤ `tolerance`** 的候选，偏差最小者胜出（并列时依次取总原子数较少、Hill 顺序字符串较小者）。提供 `molar_mass` 时，取**最接近实测值的正整数倍**作为分子式，其相对偏差（%）同样须 ≤ `tolerance`。
@@ -235,10 +293,10 @@ pytest                 # 运行测试
 app/
   parser.py         # 分子式解析：嵌套括号、结晶水、离子电荷
   balancer.py       # 守恒矩阵（含电荷行）、有理数 RREF、零空间、整数化
-  stoichiometry.py  # 内置原子量表、投料换算、限制反应物、产量与剩余量（Decimal）
+  stoichiometry.py  # 内置原子量表、投料换算、限制反应物、产量与剩余量、批次投料规划（Decimal）
   formula_infer.py  # 质量百分比 → 摩尔比 → 互质下标候选 → 经验式/分子式推断（Decimal）
   schemas.py        # 请求/响应模型
   main.py           # FastAPI 路由
-tests/test_api.py / tests/test_stoichiometry.py / tests/test_formula_infer.py
+tests/test_api.py / tests/test_stoichiometry.py / tests/test_stoichiometry_plan.py / tests/test_formula_infer.py
 Dockerfile / docker-compose.yml
 ```
